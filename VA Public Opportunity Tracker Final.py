@@ -7,11 +7,9 @@ Sources:
   • Fairfax County solicitation portal
   • Loudoun County bid portal
   • Arlington County procurement (Vendor Registry portal)
-  • ENR East construction news (Engineering News-Record)
 
 Outputs a daily PDF report and emails it to all configured recipients.
 """
-
 import os
 import re
 import json
@@ -19,6 +17,9 @@ import smtplib
 import schedule
 import time
 import requests
+import msal
+import base64
+from dotenv import load_dotenv
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -34,35 +35,21 @@ from reportlab.platypus import (
 )
 from reportlab.lib.enums import TA_CENTER
 
-import msal
-import requests
-import os
-from dotenv import load_dotenv
- 
-load_dotenv("C:/Python_Scripts/N-Able/.env")
- 
-client_id = os.getenv("")
-tenant_id = os.getenv("")
-client_secret = os.getenv("")
- 
-authority = f"https://login.microsoftonline.com/{tenant_id}"
-scope = ["https://graph.microsoft.com/.default"]
- 
-app = msal.ConfidentialClientApplication(
-    client_id=client_id,
-    client_credential=client_secret,
-    authority=authority
-)
- 
-token_result = app.acquire_token_for_client(scopes=scope)
-access_token = token_result["access_token"]
-
 # ── CONFIG ───────────────────────────────────────────────────────────────────
-EMAIL_SENDER   = "crisdelcontracting@gmail.com"
-EMAIL_PASSWORD = os.environ.get("CRISDEL_EMAIL_PASSWORD", "zmhh pklm hgzn ouwr")
+# Load environment variables from .env file
+load_dotenv()
+
+# Azure/Microsoft Graph Configuration
+CLIENT_ID = os.getenv("crisdel_client_id")
+TENANT_ID = os.getenv("crisdel_tenant_id")
+CLIENT_SECRET = os.getenv("crisdel_client_secret")
+
+# Email Configuration
+EMAIL_SENDER   = "analytics@crisdel.com"  # Mailbox to send from
+EMAIL_PASSWORD = os.environ.get("CRISDEL_EMAIL_PASSWORD", "")  # Deprecated (no longer used)
 
 # Add/remove recipients here — at least one entry required in EMAIL_TO
-EMAIL_TO  = ["analytics_team@crisdel.com"]           # Primary recipients
+EMAIL_TO  = ["rmacak@crisdel.com"]           # Primary recipients
 EMAIL_CC  = []                            # CC recipients, e.g. ["boss@crisdel.com", "team@crisdel.com"]
 
 PDF_FILE     = "Crisdel Virginia Public Opportunities {date}.pdf"   # {date} filled at runtime
@@ -93,11 +80,6 @@ COUNTY_SOURCES = {
 }
 
 ARLINGTON_PORTAL = "https://vrapp.vendorregistry.com/Bids/View/BidsList?BuyerId=a596c7c4-0123-4202-bf15-3583300ee088"
-
-# ENR East construction news — no subscription needed for titles/summaries
-ENR_EAST_URL   = "https://www.enr.com/topics/1057-east-construction-news"
-ENR_EAST_HOME  = "https://www.enr.com/east"
-ENR_MAX_ITEMS  = 8   # How many ENR articles to include per run
 
 # ── CONSTANTS ────────────────────────────────────────────────────────────────
 # MWAA solicitation-number prefixes that signal a real procurement entry
@@ -142,7 +124,7 @@ NON_CONSTRUCTION_KEYWORDS = [
     "disparity study", "recreational program",
     "towing service", "courier service",
     "laundry service", "dry cleaning",
-    "landscaping service",
+    "landscaping service", "roofing", "building rehabilitation", "CEI Services", "inspection", "consulting",
 ]
 
 # VDOT filters (unchanged from original)
@@ -749,91 +731,6 @@ def scrape_arlington(url: str, label: str) -> list:
     print(f"  ✅ Found {len(results)} construction solicitations in {label}")
     return results
 
-
-# ── ENR EAST SCRAPER ──────────────────────────────────────────────────────────
-def scrape_enr(url: str, label: str, max_items: int = ENR_MAX_ITEMS) -> list:
-    """
-    Scrape Engineering News-Record East construction news.
-
-    ENR East covers the Mid-Atlantic / Northeast region and is publicly
-    accessible for article titles and summaries without a subscription.
-    Full article text requires a subscription; the link directs there.
-
-    Falls back to the ENR East homepage if the news topic page fails.
-    """
-    print(f"  🔍 Scraping {label}: {url}")
-    soup = None
-    for try_url in (url, ENR_EAST_HOME):
-        try:
-            resp = requests.get(try_url, headers=HEADERS, timeout=20)
-            resp.raise_for_status()
-            soup = BeautifulSoup(resp.text, "html.parser")
-            break
-        except Exception as e:
-            print(f"    ⚠️  {try_url} failed: {e}")
-
-    if soup is None:
-        print(f"  ❌ All ENR URLs failed")
-        return []
-
-    results = []
-    seen: set = set()
-
-    # ENR pages render articles as <h2> headings with <a> children
-    for h2 in soup.find_all("h2"):
-        a = h2.find("a", href=True)
-        if not a:
-            continue
-        title = a.get_text(strip=True)
-        if not title or title in seen:
-            continue
-
-        href     = a["href"]
-        full_url = href if href.startswith("http") else "https://www.enr.com" + href
-
-        # Skip non-article links (top-lists, blogs, etc.)
-        if "/articles/" not in full_url and "/blogs/" not in full_url:
-            continue
-
-        # Gather summary from the siblings that follow this h2
-        summary_parts = []
-        node = h2.find_next_sibling()
-        for _ in range(5):
-            if node is None or node.name in ("h2", "h3", "hr", "footer"):
-                break
-            text = node.get_text(strip=True)
-            # Skip short navigational fragments and author-only lines
-            if len(text) > 30 and "read more" not in text.lower():
-                summary_parts.append(text)
-            node = node.find_next_sibling()
-
-        # Also check for a direct <p> sibling
-        p = h2.find_next_sibling("p")
-        if p:
-            pt = p.get_text(strip=True)
-            if pt and pt not in summary_parts:
-                summary_parts.insert(0, pt)
-
-        summary = " ".join(summary_parts[:2])  # keep it tight
-
-        combined_text = (title + " " + summary).lower()
-        if not any(kw in combined_text for kw in VIRGINIA_KEYWORDS):
-            continue
-
-        seen.add(title)
-        results.append({
-            "title":       title,
-            "description": truncate_text(summary or "ENR industry article. Visit the link for full content."),
-            "url":         full_url,
-        })
-
-        if len(results) >= max_items:
-            break
-
-    print(f"  ✅ Found {len(results)} Virginia-related ENR articles")
-    return results
-
-
 # ── MAIN SCRAPE ──────────────────────────────────────────────────────────────
 def run_scrape():
     print("\n🚀 Starting scrape...\n")
@@ -888,10 +785,6 @@ def run_scrape():
     arlington_entries = scrape_arlington(ARLINGTON_PORTAL, "Arlington County")
     tag_and_store("Arlington County", arlington_entries)
 
-    # ── ENR East ──
-    enr_entries = scrape_enr(ENR_EAST_URL, "ENR Industry News")
-    tag_and_store("ENR Industry News", enr_entries)
-
     # ── Persist history ──
     all_keys = {e["title"] for entries in all_data.values() for e in entries}
     save_history(history | all_keys)
@@ -921,7 +814,7 @@ def build_pdf(all_data: dict, total_count: int, new_count: int) -> str:
         "ReportTitle",
         fontSize=24, fontName="Helvetica-Bold",
         textColor=colors.HexColor("#1A2E4A"),
-        leading=30, spaceAfter=14, alignment=TA_CENTER,
+        leading=30, spaceAfter=7, alignment=TA_CENTER,
     )
     s_subtitle = ParagraphStyle(
         "Subtitle",
@@ -967,7 +860,6 @@ def build_pdf(all_data: dict, total_count: int, new_count: int) -> str:
         "Fairfax County":        "#6A1B9A",
         "Loudoun County":        "#B71C1C",
         "Arlington County":      "#00695C",   # teal
-        "ENR Industry News":     "#5D4037",   # brown
     }
 
     story = []
@@ -1071,8 +963,7 @@ def build_pdf(all_data: dict, total_count: int, new_count: int) -> str:
                             color=colors.HexColor("#CCCCCC"), spaceBefore=6))
     story.append(Paragraph(
         "Auto-generated by the Crisdel Opportunity Tracker · "
-        "Sources: MWAA, VDOT Northern Virginia, Fairfax County, Loudoun County, "
-        "Arlington County, ENR East",
+        "Sources: MWAA, VDOT Northern Virginia, Fairfax County, Loudoun County and Arlington County",
         ParagraphStyle("Footer", fontSize=7, fontName="Helvetica",
                        textColor=colors.HexColor("#999999"), alignment=TA_CENTER),
     ))
@@ -1081,20 +972,33 @@ def build_pdf(all_data: dict, total_count: int, new_count: int) -> str:
     print(f"  ✅ PDF saved: {pdf_path}")
     return pdf_path
 
-
 # ── EMAIL ───────────────────────────────────────────────────────────────────────────
 def send_email(pdf_path: str, all_data: dict, total_count: int, new_count: int) -> None:
-    msg = MIMEMultipart()
-    msg["From"]    = EMAIL_SENDER
-    msg["To"]      = ", ".join(EMAIL_TO)
-    msg["Subject"] = (
-        f"Crisdel Opportunities Report — "
+    # Authenticate with Azure/Microsoft Graph
+    authority = f"https://login.microsoftonline.com/{TENANT_ID}"
+    scope = ["https://graph.microsoft.com/.default"]
+   
+    app = msal.ConfidentialClientApplication(
+        client_id=CLIENT_ID,
+        client_credential=CLIENT_SECRET,
+        authority=authority
+    )
+   
+    token_result = app.acquire_token_for_client(scopes=scope)
+   
+    if "access_token" not in token_result:
+        print(f"  ❌ Token Error: {token_result.get('error')} - {token_result.get('error_description')}")
+        return
+   
+    access_token = token_result["access_token"]
+   
+    # Build email subject
+    subject = (
+        f"VA Public Bid Opportunities — "
         f"{datetime.now().strftime('%B %d, %Y')} "
         f"({total_count} total, {new_count} new)"
     )
-    if EMAIL_CC:
-        msg["Cc"] = ", ".join(EMAIL_CC)
-
+   
     # Build a section-by-section summary for the email body
     section_lines = []
     for section, entries in all_data.items():
@@ -1105,8 +1009,7 @@ def send_email(pdf_path: str, all_data: dict, total_count: int, new_count: int) 
                 line += f"  ({new_in_section} NEW)"
             section_lines.append(line)
 
-    
-# Build a detailed listing of just the NEW opportunities (title, description, link)
+    # Build a detailed listing of just the NEW opportunities (title, description, link)
     new_items_blocks = []
     for section, entries in all_data.items():
         new_entries = [e for e in entries if e.get("is_new")]
@@ -1145,30 +1048,63 @@ BREAKDOWN BY SOURCE
 {chr(10).join(section_lines)}
 
 {new_items_section}
-Sources: MWAA, VDOT Northern Virginia, Fairfax County, Loudoun County,
-         Arlington County, ENR East (Engineering News-Record)
+Sources: MWAA, VDOT Northern Virginia, Fairfax County, Loudoun County, and Arlington County.
 
 This is an automated daily report. Please do not reply to this email.
 
 — Crisdel Opportunity Tracker
 """
-
-    msg.attach(MIMEText(body, "plain"))
-
+   
+    # Read PDF for attachment
     with open(pdf_path, "rb") as f:
-        part = MIMEBase("application", "octet-stream")
-        part.set_payload(f.read())
-        encoders.encode_base64(part)
-        part.add_header("Content-Disposition",
-                        f"attachment; filename={os.path.basename(pdf_path)}")
-        msg.attach(part)
-
+        pdf_content = f.read()
+   
+    # Encode PDF as base64 for attachment
+    pdf_base64 = base64.b64encode(pdf_content).decode('utf-8')
+   
+    # Prepare Graph API request
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+   
     all_recipients = EMAIL_TO + EMAIL_CC
+    to_recipients = []
+    cc_recipients = []
+   
+    for email in EMAIL_TO:
+        to_recipients.append({"emailAddress": {"address": email}})
+    for email in EMAIL_CC:
+        cc_recipients.append({"emailAddress": {"address": email}})
+   
+    payload = {
+        "message": {
+            "subject": subject,
+            "body": {"contentType": "Text", "content": body},
+            "toRecipients": to_recipients,
+            "ccRecipients": cc_recipients,
+            "attachments": [
+                {
+                    "@odata.type": "#microsoft.graph.fileAttachment",
+                    "name": os.path.basename(pdf_path),
+                    "contentBytes": pdf_base64
+                }
+            ]
+        },
+        "saveToSentItems": "true"
+    }
+   
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-            server.sendmail(EMAIL_SENDER, all_recipients, msg.as_string())
-        print(f"  ✅ Email sent to: {', '.join(all_recipients)}")
+        response = requests.post(
+            f"https://graph.microsoft.com/v1.0/users/{EMAIL_SENDER}/sendMail",
+            headers=headers,
+            json=payload
+        )
+       
+        if response.status_code in [200, 202]:
+            print(f"  ✅ Email sent to: {', '.join(all_recipients)}")
+        else:
+            print(f"  ❌ Email failed: Status {response.status_code} - {response.text}")
     except Exception as e:
         print(f"  ❌ Email failed: {e}")
 
@@ -1183,10 +1119,4 @@ def job():
 
 # ── ENTRY POINT ─────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    job()   # Run immediately on start
-
-    schedule.every().day.at("07:00").do(job)
-    print("⏰ Scheduler running — next run at 07:00 daily. Press Ctrl+C to stop.\n")
-    while True:
-        schedule.run_pending()
-        time.sleep(30)
+    job()  
