@@ -995,7 +995,7 @@ def send_email(pdf_path: str, all_data: dict, total_count: int, new_count: int) 
     # Build email subject
     subject = (
         f"VA Public Bid Opportunities — "
-        f"{datetime.now().strftime('%B %d, %Y')} "
+        f"{now_eastern().strftime('%B %d, %Y')} "
         f"({total_count} total, {new_count} new)"
     )
    
@@ -1042,7 +1042,7 @@ Please find attached the daily Virginia Public Construction Opportunities Report
 SUMMARY
   Total Opportunities: {total_count}
   New Today: {new_count}
-  Report Date: {datetime.now().strftime('%B %d, %Y at %I:%M %p')}
+  Report Date: {now_eastern().strftime('%B %d, %Y at %I:%M %p %Z')}
 
 BREAKDOWN BY SOURCE
 {chr(10).join(section_lines)}
