@@ -1042,7 +1042,7 @@ Please find attached the daily Virginia Public Construction Opportunities Report
 SUMMARY
   Total Opportunities: {total_count}
   New Today: {new_count}
-  Report Date: {now_eastern().strftime('%B %d, %Y at %I:%M %p %Z')}
+  Report Date: {datetime.now().strftime('%B %d, %Y at %I:%M %p %Z')}
 
 BREAKDOWN BY SOURCE
 {chr(10).join(section_lines)}
