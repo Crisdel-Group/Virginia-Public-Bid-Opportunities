@@ -797,7 +797,7 @@ def run_scrape():
 def build_pdf(all_data: dict, total_count: int, new_count: int) -> str:
     today      = datetime.now().strftime("%m-%d-%Y")
     pdf_path   = PDF_FILE.format(date=today)
-    now_str    = datetime.now().strftime("%B %d, %Y at %I:%M %p")
+    now_str    = datetime.now().strftime("%B %d, %Y")
     date_str   = datetime.now().strftime("%m/%d/%Y")
 
     doc = SimpleDocTemplate(
@@ -995,7 +995,7 @@ def send_email(pdf_path: str, all_data: dict, total_count: int, new_count: int) 
     # Build email subject
     subject = (
         f"VA Public Bid Opportunities — "
-        f"{datetime.now().strftime('%B %d, %Y')} "
+        f"{datetime.strftime('%B %d, %Y')} "
         f"({total_count} total, {new_count} new)"
     )
    
@@ -1042,7 +1042,7 @@ Please find attached the daily Virginia Public Construction Opportunities Report
 SUMMARY
   Total Opportunities: {total_count}
   New Today: {new_count}
-  Report Date: {datetime.now().strftime('%B %d, %Y at %I:%M %p %Z')}
+  Report Date: {datetime.now().strftime('%B %d, %Y)}
 
 BREAKDOWN BY SOURCE
 {chr(10).join(section_lines)}
