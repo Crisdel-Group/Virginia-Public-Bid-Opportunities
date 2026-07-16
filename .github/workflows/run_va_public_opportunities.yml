@@ -2,7 +2,7 @@ name: Run VA Public Opportunities Scraper
 on:
   workflow_dispatch:
   schedule:
-    - cron: '13 11 * * *'
+    - cron: '0 11 * * *'
 jobs:
   run-scraper:
     runs-on: ubuntu-latest
