@@ -49,7 +49,7 @@ EMAIL_SENDER   = "analytics@crisdel.com"  # Mailbox to send from
 EMAIL_PASSWORD = os.environ.get("CRISDEL_EMAIL_PASSWORD", "")  # Deprecated (no longer used)
 
 # Add/remove recipients here — at least one entry required in EMAIL_TO
-EMAIL_TO  = ["frankc@crisdel.com", "barryh@crisdel.com", "mpollio@crisdel.com", "groti@crisdel.com", "michaelc@crisdel.com", "franksr@risdel.com"]           # Primary recipients
+EMAIL_TO  = ["frankc@crisdel.com", "barryh@crisdel.com", "mpollio@crisdel.com", "groti@crisdel.com", "michaelc@crisdel.com", "franksr@crisdel.com"]           # Primary recipients
 EMAIL_CC  = ["rmacak@crisdel.com"]                            # CC recipients, e.g. ["boss@crisdel.com", "team@crisdel.com"]
 
 PDF_FILE     = "Crisdel Virginia Public Opportunities {date}.pdf"   # {date} filled at runtime
