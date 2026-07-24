@@ -229,6 +229,171 @@ def _xml_escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+# ── DATE FILTERING ───────────────────────────────────────────────────────────
+# Each scraper embeds the relevant date in its description with one of these
+# labels: MWAA uses "Due:", Fairfax/Loudoun use "Closes:", Arlington uses
+# "Deadline:". VDOT doesn't label a date at all — its description is just
+# free text pulled from the project page, so it falls through to the bare-
+# date fallback below (or is left unfiltered if no date-looking text is found).
+_DATE_LABEL_RE = re.compile(
+    r"(?:Due Date|Due|Closes|Closing Date|Deadline)\s*:?\s*([^|]+)",
+    re.IGNORECASE,
+)
+# Fallback for descriptions with no labeled date (VDOT) — find every
+# date-looking token and use the latest one, since a closing/due date is
+# almost always the most-future date mentioned in project text.
+_BARE_DATE_RE = re.compile(
+    r"\b(\d{1,2}/\d{1,2}/\d{2,4}|"
+    r"[A-Za-z]+\s+\d{1,2},?\s+\d{4}|"
+    r"\d{1,2}-[A-Za-z]{3}-\d{4})\b"
+)
+_NON_DATE_STATUS_WORDS = {"open", "available", "closed", "pending", "n/a", "tbd"}
+
+
+def _parse_date_safe(date_str: str):
+    date_str = date_str.strip()
+    if not date_str or date_str.lower() in _NON_DATE_STATUS_WORDS:
+        return None
+    date_str = re.sub(r"^EXTENDED TO\s+", "", date_str, flags=re.IGNORECASE)
+    try:
+        return date_parser.parse(date_str, fuzzy=True)
+    except (ValueError, OverflowError, TypeError):
+        return None
+
+
+def extract_deadline(description: str):
+    """
+    Best-effort extraction of the closing/due/deadline date from a listing's
+    description. Returns a datetime, or None if no date could be found or
+    parsed — callers should treat None as "unknown, don't filter it out"
+    rather than assuming it's expired.
+    """
+    if not description:
+        return None
+
+    m = _DATE_LABEL_RE.search(description)
+    if m:
+        parsed = _parse_date_safe(m.group(1))
+        if parsed:
+            return parsed
+
+    # Fallback: no labeled date (e.g. VDOT), or the labeled value wasn't a
+    # real date — scan for bare date-looking tokens and take the latest.
+    candidates = []
+    for match in _BARE_DATE_RE.findall(description):
+        parsed = _parse_date_safe(match)
+        if parsed:
+            candidates.append(parsed)
+    return max(candidates) if candidates else None
+
+
+def is_expired(description: str, today: datetime = None) -> bool:
+    """True only if a deadline was found AND it's strictly before today."""
+    today = today or datetime.now()
+    deadline = extract_deadline(description)
+    if deadline is None:
+        return False
+    return deadline.date() < today.date()
+
+
+# ── VDOT-SPECIFIC STALENESS FILTER ──────────────────────────────────────────
+# VDOT's project pages aren't time-bound solicitations like MWAA/county bids —
+# they're persistent status pages that stay live long after a project starts
+# or even finishes. There's no "Due:"/"Closes:" date to check, so instead we
+# look at "Start Date" / "Estimated Completion date" (both present in every
+# VDOT description) plus a few phrases VDOT uses consistently:
+#   - "advertised for construction"        -> actively seeking a contractor now
+#   - "construction contract has been awarded" -> already given to someone else
+#   - "was completed" / "project is completed" -> long since finished
+# A past Start Date (and no override phrase) means the project is already
+# underway/awarded, which isn't something to bid on now.
+_VDOT_COMPLETED_RE  = re.compile(
+    r"\b(?:was completed|has been completed|is completed|"
+    r"construction was completed|project (?:was|is) completed)\b",
+    re.IGNORECASE,
+)
+_VDOT_AWARDED_RE    = re.compile(r"\bcontract has been awarded\b", re.IGNORECASE)
+_VDOT_ADVERTISED_RE = re.compile(r"\badvertised for construction\b", re.IGNORECASE)
+
+_VDOT_SEASON_MONTH = {
+    "winter": 1, "early": 2, "spring": 4, "mid": 6,
+    "summer": 7, "fall": 10, "autumn": 10, "late": 11,
+}
+_VDOT_SEASON_YEAR_RE = re.compile(
+    r"\b(winter|early|spring|mid|summer|fall|autumn|late)[\s-]?(\d{4})\b",
+    re.IGNORECASE,
+)
+_VDOT_PHASE_PREFIX_RE = re.compile(r"^(?:phase|package)\s*\d+\s*[-:]\s*", re.IGNORECASE)
+_VDOT_TBD_RE = re.compile(r"\bTBD\b|\bto be determined\b|\bN/?A\b", re.IGNORECASE)
+
+
+def _parse_vdot_date_field(description: str, field_label: str):
+    """
+    Extract and approximate a "Start Date <value>" or "Estimated Completion
+    date <value>" field from a VDOT description. Handles VDOT's loose
+    phrasing — "Late 2032", "Mid-2027", "Phase 1: February 2021 Phase 2:
+    ..." — but this is inherently approximate (season → nearest month,
+    only the first phase considered for multi-phase projects). Returns a
+    datetime or None if the field is missing, TBD, or unparseable.
+    """
+    m = re.search(
+        rf"{re.escape(field_label)}:?\s+(.+?)(?=Estimated Completion date|Estimated Cost|Please note|$)",
+        description, re.IGNORECASE,
+    )
+    if not m:
+        return None
+    val = m.group(1).strip()
+    if not val or _VDOT_TBD_RE.search(val):
+        return None
+    # Only look at the first phase/package for multi-phase date ranges —
+    # strip a leading "Phase 1:"/"Package 1:" prefix, then cut off anything
+    # from the *next* phase/package marker onward.
+    val = re.split(r";", val)[0].strip()
+    val = _VDOT_PHASE_PREFIX_RE.sub("", val, count=1).strip()
+    val = re.split(r"\bphase\s*\d+\b|\bpackage\s*\d+\b", val, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    if not val or _VDOT_TBD_RE.fullmatch(val.strip(".")):
+        return None
+
+    season_m = _VDOT_SEASON_YEAR_RE.search(val)
+    if season_m:
+        month = _VDOT_SEASON_MONTH.get(season_m.group(1).lower(), 6)
+        year = int(season_m.group(2))
+        return datetime(year, month, 1)
+
+    try:
+        return date_parser.parse(val, fuzzy=True, default=datetime(datetime.now().year, 1, 1))
+    except (ValueError, OverflowError, TypeError):
+        return None
+
+
+def vdot_should_include(description: str, today: datetime = None) -> bool:
+    """
+    True if a VDOT project still looks like something Crisdel could bid on:
+    not yet started (or actively advertised for construction right now),
+    not already awarded to someone else, and not already completed.
+    """
+    today = today or datetime.now()
+    if not description:
+        return True
+
+    if _VDOT_COMPLETED_RE.search(description):
+        return False
+    if _VDOT_AWARDED_RE.search(description):
+        return False
+    if _VDOT_ADVERTISED_RE.search(description):
+        return True  # explicit "seeking a contractor now" signal wins
+
+    start = _parse_vdot_date_field(description, "Start Date")
+    if start is not None and start.date() < today.date():
+        return False
+
+    completion = _parse_vdot_date_field(description, "Estimated Completion date")
+    if completion is not None and completion.date() < today.date():
+        return False
+
+    return True
+
+
 # ── HISTORY ──────────────────────────────────────────────────────────────────
 def load_history() -> set:
     if os.path.exists(HISTORY_FILE):
@@ -743,18 +908,30 @@ def run_scrape():
     # Track MWAA solicitation numbers across Current + Upcoming to avoid duplicates
     mwaa_seen_nums: set = set()
 
-    def tag_and_store(label: str, entries: list, dedup_set: set = None):
+    def tag_and_store(label: str, entries: list, dedup_set: set = None, extra_filter=None):
         nonlocal total_count, new_count
         tagged = []
+        expired_count = 0
+        stale_count = 0
         for e in entries:
             if dedup_set is not None:
                 sol_num = extract_sol_num(e["title"])
                 if sol_num in dedup_set:
                     continue
                 dedup_set.add(sol_num)
+            if is_expired(e.get("description", "")):
+                expired_count += 1
+                continue
+            if extra_filter is not None and not extra_filter(e.get("description", "")):
+                stale_count += 1
+                continue
             key    = e["title"]
             is_new = key not in history
             tagged.append({**e, "is_new": is_new})
+        if expired_count:
+            print(f"    🗓️  Dropped {expired_count} expired listing(s) in {label}")
+        if stale_count:
+            print(f"    🚧 Dropped {stale_count} already-started/awarded/completed listing(s) in {label}")
         all_data[label] = tagged
         total_count    += len(tagged)
         new_count      += sum(1 for e in tagged if e["is_new"])
@@ -766,10 +943,10 @@ def run_scrape():
     mwaa_upcoming_entries = scrape_mwaa(MWAA_SOURCES["MWAA Upcoming"], "MWAA Upcoming")
     tag_and_store("MWAA Upcoming", mwaa_upcoming_entries, mwaa_seen_nums)
 
-    # ── VDOT ──
+    # ── VDOT (staleness filter: drop already-started/awarded/completed projects) ──
     for label, url in VDOT_SOURCES.items():
         entries = scrape_vdot_district(url, label)
-        tag_and_store(label, entries)
+        tag_and_store(label, entries, extra_filter=vdot_should_include)
 
     # ── Counties ──
     for label, url in COUNTY_SOURCES.items():
@@ -1119,4 +1296,4 @@ def job():
 
 # ── ENTRY POINT ─────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    job()  
+    job()
