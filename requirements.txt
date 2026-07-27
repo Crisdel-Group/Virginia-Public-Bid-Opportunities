@@ -4,3 +4,4 @@ reportlab
 msal
 python-dotenv
 schedule
+python-dateutil
