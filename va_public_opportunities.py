@@ -20,6 +20,7 @@ import requests
 import msal
 import base64
 from dotenv import load_dotenv
+from dateutil import parser as date_parser  # ← ADD THIS LINE
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
