@@ -13,6 +13,7 @@ Outputs a daily PDF report and emails it to all configured recipients.
 import os
 import re
 import json
+from urllib.parse import urlparse
 import smtplib
 import schedule
 import time
@@ -37,23 +38,19 @@ from reportlab.platypus import (
 from reportlab.lib.enums import TA_CENTER
 
 # ── CONFIG ───────────────────────────────────────────────────────────────────
-# Load environment variables from .env file
 load_dotenv()
 
-# Azure/Microsoft Graph Configuration
 CLIENT_ID = os.getenv("crisdel_client_id")
 TENANT_ID = os.getenv("crisdel_tenant_id")
 CLIENT_SECRET = os.getenv("crisdel_client_secret")
 
-# Email Configuration
-EMAIL_SENDER   = "analytics@crisdel.com"  # Mailbox to send from
-EMAIL_PASSWORD = os.environ.get("CRISDEL_EMAIL_PASSWORD", "")  # Deprecated (no longer used)
+EMAIL_SENDER   = "analytics@crisdel.com" 
+EMAIL_PASSWORD = os.environ.get("CRISDEL_EMAIL_PASSWORD", "")
 
-# Add/remove recipients here — at least one entry required in EMAIL_TO
-EMAIL_TO  = ["frankc@crisdel.com", "barryh@crisdel.com", "mpollio@crisdel.com", "groti@crisdel.com", "michaelc@crisdel.com", "franksr@crisdel.com"]           # Primary recipients
-EMAIL_CC  = ["rmacak@crisdel.com"]                            # CC recipients, e.g. ["boss@crisdel.com", "team@crisdel.com"]
+EMAIL_TO  = ["rmacak@crisdel.com"]  
+EMAIL_CC  = []                         
 
-PDF_FILE     = "Crisdel Virginia Public Opportunities {date}.pdf"   # {date} filled at runtime
+PDF_FILE     = "Crisdel Virginia Public Opportunities {date}.pdf" 
 HISTORY_FILE = "seen_opportunities.json"
 
 HEADERS = {
@@ -74,7 +71,6 @@ VDOT_SOURCES = {
     "VDOT Northern Virginia": "https://www.vdot.virginia.gov/projects/northern-virginia-district/",
 }
 
-# All three county portals are scrapable with requests.
 COUNTY_SOURCES = {
     "Fairfax County": "https://www.fairfaxcounty.gov/solicitation/",
     "Loudoun County": "https://www.loudoun.gov/bids.aspx",
@@ -82,8 +78,35 @@ COUNTY_SOURCES = {
 
 ARLINGTON_PORTAL = "https://vrapp.vendorregistry.com/Bids/View/BidsList?BuyerId=a596c7c4-0123-4202-bf15-3583300ee088"
 
+# ── NEW SOURCES (added from Virginia_Links.docx) ────────────────────────────
+CIVICPLUS_SOURCES = {
+    "Hampton":       "https://www.hampton.gov/Bids.aspx",
+    "Falls Church":  "https://www.fallschurchva.gov/bids.aspx",
+}
+
+GENERIC_SOURCES = {
+    "City of Norfolk":                    "https://www.norfolk.gov/4969/OpenGov-Procurement",
+    "Chesapeake":                          "https://www.cityofchesapeake.net/941/Current-Solicitations",
+    "Herndon":                             "https://www.herndon-va.gov/departments/communications-economic-development/sm/advanced-components/list-detail-pages/rfp-posts-list",
+    "City of Fairfax":                     "https://www.fairfaxva.gov/Property-Business/Business-with-the-City/Procurement/Current-Solicitations",
+    "Leesburg":                            "https://www.leesburgva.gov/departments/finance/procurement/bid-board",
+    "Norfolk International Airport":       "https://www.flyorf.com/airport-business/",
+    "Richmond International Airport":      "https://www.rva.gov/procurement-services/solicitations",
+    "Roanoke-Blacksburg Regional Airport": "https://flyroa.com/current-bids-and-proposals",
+    "University of Virginia":              "https://www.fm.virginia.edu/depts/fpc/contractadmin/advertisements.html",
+    "Virginia Tech":                       "https://www.facilities.vt.edu/design-construction/capital-construction/campus-construction-projects.html",
+    "University of Richmond":              "https://facilities.richmond.edu/projects/current/index.html",
+    "Old Dominion University":             "https://www.odu.edu/procurement/contracts",
+    "Radford University":                  "https://www.radford.edu/procurement/vendor-portal.html",
+    "Hampden-Sydney College":              "https://www.rfpschoolwatch.com/bid-opportunities/hampden-sydney-college/",
+    "Randolph-Macon College":              "https://www.rfpschoolwatch.com/bid-opportunities/randolph-macon-college/",
+}
+
+EVA_SOURCES = {
+    "Virginia eVA Statewide (Open Construction)": "https://mvendor.cgieva.com/Vendor/public/AllOpportunities.jsp?status=Open&category=Construction",
+}
+
 # ── CONSTANTS ────────────────────────────────────────────────────────────────
-# MWAA solicitation-number prefixes that signal a real procurement entry
 MWAA_PREFIXES = ("IFB-", "RFP-", "RFQ-", "ITB-", "IFQ-", "RFQI-")
 
 MWAA_LOCATION_KEYWORDS = [
@@ -91,7 +114,6 @@ MWAA_LOCATION_KEYWORDS = [
     "fairfax", "loudoun", "loudon", "arlington", "virginia",
 ]
 
-# Keywords that flag a solicitation as construction-related
 CONSTRUCTION_KEYWORDS = [
     "construction", "renovation", "rehabilitation", "repair", "infrastructure",
     "road", "bridge", "pavement", "sidewalk", "building", "facility", "trail",
@@ -126,9 +148,36 @@ NON_CONSTRUCTION_KEYWORDS = [
     "towing service", "courier service",
     "laundry service", "dry cleaning",
     "landscaping service", "roofing", "building rehabilitation", "CEI Services", "inspection", "consulting",
+    # Added after reviewing the first Norfolk International Airport / one-off-site
+    # report: these sites label everything "Invitation for Bid", including
+    # non-construction equipment and IT contracts, so the generic phrase
+    # "invitation for bid" alone isn't a reliable construction signal there.
+    "generator maintenance", "generator repair", "vehicle maintenance",
+    "vehicle and equipment maintenance", "fleet maintenance", "equipment maintenance",
+    "it cabling", "cabling infrastructure", "network cabling",
+    "carpet replacement", "carpet installation", "carpet repair",
+    # Explicitly out of scope for Crisdel (not construction work they bid on)
+    "electrical service", "electrical services", "on-call electrical",
+    "tree clearing", "tree removal", "tree trimming",
+    "fountain repair", "fountain repairs", "fountain maintenance", "fountain aeration",
 ]
 
-# VDOT filters (unchanged from original)
+REFERENCE_DOC_TITLE_KEYWORDS = [
+    "guidelines", "handbook", "manual", "policy", "procedures", "toolkit",
+    "template", "user guide", "vendor guide", "standard details",
+    "design standards", "faq", "faq's", "how to", "faqs",
+]
+
+GENERIC_NAV_OR_SECTION_TITLES = {
+    "contact", "contact us", "news", "menu", "home", "about", "about us",
+    "search", "login", "log in", "sitemap", "site map", "accessibility",
+    "privacy policy", "terms of service", "careers", "jobs", "calendar",
+    "directory", "faq", "faqs", "construction", "construction advertisements",
+    "projects under construction", "current projects", "recent projects",
+    "featured projects", "press releases", "news & alerts",
+    "inclusive building features", "all-gender restrooms",
+}
+
 VDOT_EXCLUDE_KEYWORDS = [
     "public hearing", "appendix", "newsletter", "survey", "frequently asked",
     "faq", "transcript", "comment", "presentation", "study report", "final report",
@@ -230,19 +279,27 @@ def _xml_escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _base_domain(url: str) -> str:
+    """Return the scheme+host portion of a URL, e.g. 'https://www.example.gov'."""
+    m = re.match(r"https?://[^/]+", url)
+    return m.group(0) if m else url
+
+
+def _resolve_href(href: str, base_domain: str) -> str:
+    href = href.strip()
+    if href.startswith("http"):
+        return href
+    if href.startswith("/"):
+        return base_domain + href
+    return base_domain + "/" + href
+
+
 # ── DATE FILTERING ───────────────────────────────────────────────────────────
-# Each scraper embeds the relevant date in its description with one of these
-# labels: MWAA uses "Due:", Fairfax/Loudoun use "Closes:", Arlington uses
-# "Deadline:". VDOT doesn't label a date at all — its description is just
-# free text pulled from the project page, so it falls through to the bare-
-# date fallback below (or is left unfiltered if no date-looking text is found).
 _DATE_LABEL_RE = re.compile(
     r"(?:Due Date|Due|Closes|Closing Date|Deadline)\s*:?\s*([^|]+)",
     re.IGNORECASE,
 )
-# Fallback for descriptions with no labeled date (VDOT) — find every
-# date-looking token and use the latest one, since a closing/due date is
-# almost always the most-future date mentioned in project text.
+
 _BARE_DATE_RE = re.compile(
     r"\b(\d{1,2}/\d{1,2}/\d{2,4}|"
     r"[A-Za-z]+\s+\d{1,2},?\s+\d{4}|"
@@ -263,12 +320,6 @@ def _parse_date_safe(date_str: str):
 
 
 def extract_deadline(description: str):
-    """
-    Best-effort extraction of the closing/due/deadline date from a listing's
-    description. Returns a datetime, or None if no date could be found or
-    parsed — callers should treat None as "unknown, don't filter it out"
-    rather than assuming it's expired.
-    """
     if not description:
         return None
 
@@ -278,8 +329,6 @@ def extract_deadline(description: str):
         if parsed:
             return parsed
 
-    # Fallback: no labeled date (e.g. VDOT), or the labeled value wasn't a
-    # real date — scan for bare date-looking tokens and take the latest.
     candidates = []
     for match in _BARE_DATE_RE.findall(description):
         parsed = _parse_date_safe(match)
@@ -298,16 +347,6 @@ def is_expired(description: str, today: datetime = None) -> bool:
 
 
 # ── VDOT-SPECIFIC STALENESS FILTER ──────────────────────────────────────────
-# VDOT's project pages aren't time-bound solicitations like MWAA/county bids —
-# they're persistent status pages that stay live long after a project starts
-# or even finishes. There's no "Due:"/"Closes:" date to check, so instead we
-# look at "Start Date" / "Estimated Completion date" (both present in every
-# VDOT description) plus a few phrases VDOT uses consistently:
-#   - "advertised for construction"        -> actively seeking a contractor now
-#   - "construction contract has been awarded" -> already given to someone else
-#   - "was completed" / "project is completed" -> long since finished
-# A past Start Date (and no override phrase) means the project is already
-# underway/awarded, which isn't something to bid on now.
 _VDOT_COMPLETED_RE  = re.compile(
     r"\b(?:was completed|has been completed|is completed|"
     r"construction was completed|project (?:was|is) completed)\b",
@@ -315,6 +354,16 @@ _VDOT_COMPLETED_RE  = re.compile(
 )
 _VDOT_AWARDED_RE    = re.compile(r"\bcontract has been awarded\b", re.IGNORECASE)
 _VDOT_ADVERTISED_RE = re.compile(r"\badvertised for construction\b", re.IGNORECASE)
+
+_VDOT_NOT_BIDDABLE_RE = re.compile(
+    r"limited access control change|"
+    r"seeking federal grant funding|bridge investment program|"
+    r"remainder of construction|currently under construction|"
+    r"construction is underway|now under construction|"
+    r"public comment period is closed|"
+    r"can be seen on the following interactive map",
+    re.IGNORECASE,
+)
 
 _VDOT_SEASON_MONTH = {
     "winter": 1, "early": 2, "spring": 4, "mid": 6,
@@ -329,14 +378,6 @@ _VDOT_TBD_RE = re.compile(r"\bTBD\b|\bto be determined\b|\bN/?A\b", re.IGNORECAS
 
 
 def _parse_vdot_date_field(description: str, field_label: str):
-    """
-    Extract and approximate a "Start Date <value>" or "Estimated Completion
-    date <value>" field from a VDOT description. Handles VDOT's loose
-    phrasing — "Late 2032", "Mid-2027", "Phase 1: February 2021 Phase 2:
-    ..." — but this is inherently approximate (season → nearest month,
-    only the first phase considered for multi-phase projects). Returns a
-    datetime or None if the field is missing, TBD, or unparseable.
-    """
     m = re.search(
         rf"{re.escape(field_label)}:?\s+(.+?)(?=Estimated Completion date|Estimated Cost|Please note|$)",
         description, re.IGNORECASE,
@@ -367,13 +408,12 @@ def _parse_vdot_date_field(description: str, field_label: str):
         return None
 
 
-def vdot_should_include(description: str, today: datetime = None) -> bool:
-    """
-    True if a VDOT project still looks like something Crisdel could bid on:
-    not yet started (or actively advertised for construction right now),
-    not already awarded to someone else, and not already completed.
-    """
+def vdot_should_include(title: str, description: str, today: datetime = None) -> bool:
     today = today or datetime.now()
+    combined = f"{title} {description}"
+
+    if _VDOT_NOT_BIDDABLE_RE.search(combined):
+        return False
     if not description:
         return True
 
@@ -410,16 +450,6 @@ def save_history(seen: set) -> None:
 
 # ── MWAA SCRAPER ─────────────────────────────────────────────────────────────
 def scrape_mwaa(url: str, label: str) -> list:
-    """
-    Parse an MWAA contracting opportunities page.
-
-    Improvements over v4:
-    - Parses the DOM structure rather than raw text so descriptions are
-      captured in full (up to the truncation limit).
-    - Extracts the due date and appends it to the description for quick scanning.
-    - Prefers a direct MWAA solicitation page URL when available; otherwise
-      uses the CLM system link or falls back to the section landing page.
-    """
     print(f"  🔍 Scraping {label}: {url}")
     try:
         resp = requests.get(url, headers=HEADERS, timeout=20)
@@ -641,6 +671,24 @@ def scrape_vdot_district(url: str, label: str) -> list:
 
 
 # ── FAIRFAX COUNTY SCRAPER ───────────────────────────────────────────────────
+_FAIRFAX_BOILERPLATE_RE = re.compile(
+    r"IMPORTANT NOTICE THIS IS AN ELECTRONIC PROCUREMENT \(eBID\) SUBMISSIONS WILL ONLY BE "
+    r"ACCEPTED ELECTRONICALLY VIA THE [A-Z ()]+ PORTAL\s*\(?https?://\S+\)?\.?"
+    r"|Fairfax County (?:Government|Public Schools \(FCPS\)) uses a procurement portal powered by "
+    r"[^.]+? for accepting and evaluating (?:bids|proposals)\)?\.?"
+    r"|To register,? visit https?://\S+\.?"
+    r"|Additional assistance is also available at .+?\.(?=\s|$)"
+    r"|Submitting bids via the (?:Euna )?\(?Bonfire\)? portal is mandatory\.?"
+    r"|Fairfax County will not accept bids submitted by paper, telephone, facsimile "
+    r"\([\u201c\"]FAX[\u201d\"]\) transmission,? or electronic (?:mail|\.\.\.)\.?",
+    re.IGNORECASE,
+)
+
+
+def _strip_fairfax_boilerplate(text: str) -> str:
+    return re.sub(r"\s+", " ", _FAIRFAX_BOILERPLATE_RE.sub(" ", text)).strip()
+
+
 def scrape_fairfax(url: str, label: str) -> list:
     """
     Scrape Fairfax County's solicitation listing page and filter for
@@ -688,6 +736,7 @@ def scrape_fairfax(url: str, label: str) -> list:
 
         desc = re.sub(r"BID NUMBER[:\s]+\S+", "", body, flags=re.IGNORECASE)
         desc = re.sub(r"CLOSING DATE[\w\s/]*[:\s]+[^\.]+", "", desc, flags=re.IGNORECASE)
+        desc = _strip_fairfax_boilerplate(desc)
         desc = re.sub(r"\s+", " ", desc).strip()
         if close_str:
             desc = f"Closes: {close_str}  |  {desc}".strip(" |")
@@ -747,7 +796,7 @@ def scrape_fairfax(url: str, label: str) -> list:
             close_m = re.search(r"CLOSING DATE[/\s\w]*[:\s]+([^\n]+\w)", body, re.IGNORECASE)
             bid_num   = bid_m.group(1)          if bid_m   else ""
             close_str = close_m.group(1).strip() if close_m else ""
-            desc = body[:460]
+            desc = _strip_fairfax_boilerplate(body)[:460]
             if close_str:
                 desc = f"Closes: {close_str}  |  {desc}"
             if bid_num:
@@ -766,10 +815,6 @@ def scrape_fairfax(url: str, label: str) -> list:
 
 # ── LOUDOUN COUNTY SCRAPER ───────────────────────────────────────────────────
 def scrape_loudoun(url: str, label: str) -> list:
-    """
-    Scrape Loudoun County's public bid listing. Each bid has a unique URL
-    (bids.aspx?bidID=NNN); construction-related bids are kept.
-    """
     print(f"  🔍 Scraping {label}: {url}")
     try:
         resp = requests.get(url, headers=HEADERS, timeout=20)
@@ -841,10 +886,6 @@ def scrape_loudoun(url: str, label: str) -> list:
 
 # ── ARLINGTON COUNTY SCRAPER (Vendor Registry) ────────────────────────────────
 def scrape_arlington(url: str, label: str) -> list:
-    """
-    Scrape Arlington County's Vendor Registry procurement portal for
-    construction-related solicitations.
-    """
     print(f"  🔍 Scraping {label}: {url}")
     try:
         resp = requests.get(url, headers=HEADERS, timeout=20)
@@ -897,6 +938,431 @@ def scrape_arlington(url: str, label: str) -> list:
     print(f"  ✅ Found {len(results)} construction solicitations in {label}")
     return results
 
+
+# ── NEW: CIVICPLUS "bids.aspx" SCRAPER (Hampton, Falls Church, Loudoun Sheriff) ──
+def scrape_civicplus_bids(url: str, label: str) -> list:
+    print(f"  🔍 Scraping {label}: {url}")
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=20)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+    except Exception as e:
+        print(f"  ❌ Failed: {e}")
+        return []
+
+    base_domain = _base_domain(url)
+    results = []
+    seen: set = set()
+    seen_bid_ids: set = set()
+
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if "bids.aspx?bidid=" not in href.lower():
+            continue
+
+        bid_id_m = re.search(r'bidID=(\d+)', href, re.IGNORECASE)
+        bid_id = bid_id_m.group(1) if bid_id_m else None
+        if bid_id and bid_id in seen_bid_ids:
+            continue
+
+        title = a.get_text(strip=True)
+        if not title or title in seen:
+            continue
+
+        title_normalized = re.sub(r'\s+', ' ', title.replace('\xa0', ' '))
+        if "read on" in title_normalized.lower():
+            continue
+
+        if bid_id:
+            seen_bid_ids.add(bid_id)
+
+        full_url = _resolve_href(href, base_domain)
+
+        parent = a.find_parent(["li", "div", "p", "td"])
+        desc = ""
+        if parent:
+            ctx = parent.get_text(separator=" ", strip=True)
+            ctx = re.sub(re.escape(title), "", ctx).strip()
+            ctx = re.sub(r"\s+", " ", ctx).strip()
+
+            close_m = re.search(r"Closes[:\s]+([^\[]+?)(?:\s+Open|\s*$)", ctx, re.IGNORECASE)
+            if close_m:
+                desc = f"Closes: {close_m.group(1).strip()}  |  {ctx}"
+            else:
+                desc = ctx
+
+        if not is_construction_related(title, desc):
+            continue
+
+        seen.add(title)
+        results.append({
+            "title":       title,
+            "description": truncate_text(desc or f"See {label} bid portal for details."),
+            "url":         full_url,
+        })
+
+    print(f"  ✅ Found {len(results)} construction bids in {label}")
+    return results
+
+
+# ── NEW: GENERIC ONE-OFF PAGE SCRAPER ────────────────────────────────────────
+_PROCUREMENT_SIGNAL_RE = re.compile(
+    r"\b(?:RFP|RFQ|IFB|ITB|RFQI|bid|bids|bidder|proposal|proposals|solicitation|"
+    r"quote|invitation for bid|request for (?:proposal|qualification|quote)|"
+    r"due date|closing date|closes|deadline|submit(?:ted|tal)?)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_procurement_signal(title: str, body: str = "") -> bool:
+    return bool(_PROCUREMENT_SIGNAL_RE.search(f"{title} {body}"))
+
+
+def _looks_like_nav_or_reference(title: str) -> bool:
+    """True if a candidate title is site chrome (nav/section label) or a
+    reference document rather than an actual solicitation."""
+    tl = re.sub(r"\s+", " ", title).strip(" :.-").lower()
+    if tl in GENERIC_NAV_OR_SECTION_TITLES:
+        return True
+    if any(kw in tl for kw in REFERENCE_DOC_TITLE_KEYWORDS):
+        return True
+    if tl.startswith("current page"):
+        return True
+    return False
+
+
+def _redirected_away(url: str, landed_url: str) -> bool:
+    requested_path = urlparse(url).path.rstrip("/").lower()
+    landed_path = urlparse(landed_url).path.rstrip("/").lower()
+    if not requested_path or requested_path == landed_path:
+        return False
+    req_slug = requested_path.split("/")[-1]
+    # Landing on a sub-path that still contains the requested page's slug is
+    # fine (e.g. redirected to an equivalent URL); landing anywhere else isn't.
+    return bool(req_slug) and req_slug not in landed_path
+
+
+def _extract_listing_from_soup(soup: "BeautifulSoup", url: str, label: str, base_domain: str = None) -> list:
+    base_domain = base_domain or _base_domain(url)
+    results = []
+    seen: set = set()
+    MAX_PLAUSIBLE_BODY_CHARS = 2000  # beyond this, it's boilerplate/nav, not a description
+
+    # Pattern 1 — headings introducing a solicitation
+    for heading in soup.find_all(["h2", "h3", "h4"]):
+        title = heading.get_text(strip=True)
+        if not title or len(title) < 5 or len(title) > 200 or title in seen:
+            continue
+        if _looks_like_nav_or_reference(title):
+            continue
+
+        body_parts = []
+        link = None
+        node = heading.find_next_sibling()
+        for _ in range(6):
+            if node is None or node.name in ("h2", "h3", "h4", "hr"):
+                break
+            body_parts.append(node.get_text(separator=" ", strip=True))
+            if link is None:
+                a = node.find("a", href=True)
+                if a:
+                    link = _resolve_href(a["href"], base_domain)
+            node = node.find_next_sibling()
+        body = " ".join(body_parts)
+
+        if len(body) > MAX_PLAUSIBLE_BODY_CHARS:
+            continue
+        if not is_construction_related(title, body):
+            continue
+        if not _has_procurement_signal(title, body):
+            continue
+
+        close_m = re.search(r"(?:Closes|Closing Date|Due Date|Deadline)[:\s]+([^\.\n]+)", body, re.IGNORECASE)
+        desc = re.sub(r"\s+", " ", body).strip()
+        if close_m:
+            desc = f"Closes: {close_m.group(1).strip()}  |  {desc}"
+
+        seen.add(title)
+        results.append({
+            "title":       title,
+            "description": truncate_text(desc or f"See {label} procurement page for details."),
+            "url":         link or url,
+        })
+
+    # Pattern 2 — bare links whose anchor text looks like a solicitation title
+    if not results:
+        for a in soup.find_all("a", href=True):
+            title = a.get_text(strip=True)
+            if not title or len(title) < 8 or len(title) > 200 or title in seen:
+                continue
+            if _looks_like_nav_or_reference(title):
+                continue
+
+            href = a["href"].strip()
+            if not href or href.startswith("#") or href.lower().startswith("mailto:"):
+                continue
+            full_url = _resolve_href(href, base_domain)
+
+            parent = a.find_parent(["li", "p", "div", "td"])
+            desc = ""
+            if parent:
+                ctx = parent.get_text(separator=" ", strip=True)
+                ctx = re.sub(re.escape(title), "", ctx).strip()
+                desc = re.sub(r"\s+", " ", ctx).strip()
+
+            if not is_construction_related(title, desc):
+                continue
+            if not _has_procurement_signal(title, desc):
+                continue
+
+            if len(desc) > MAX_PLAUSIBLE_BODY_CHARS:
+                desc = ""  # keep the item, just drop an implausibly long nav-dump description
+
+            seen.add(title)
+            results.append({
+                "title":       title,
+                "description": truncate_text(desc or f"See {label} procurement page for details."),
+                "url":         full_url,
+            })
+
+    return results
+
+
+def scrape_generic_listing(url: str, label: str) -> list:
+    print(f"  🔍 Scraping {label}: {url}")
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=20, allow_redirects=True)
+        resp.raise_for_status()
+        if _redirected_away(url, resp.url):
+            print(f"  ⚠️  {label}: URL redirected to an unrelated page ({resp.url}) — skipping this source")
+            return []
+        soup = BeautifulSoup(resp.text, "html.parser")
+    except Exception as e:
+        print(f"  ❌ Failed: {e}")
+        return []
+
+    results = _extract_listing_from_soup(soup, url, label)
+    print(f"  ✅ Found {len(results)} construction items in {label}")
+    return results
+
+
+# ── PLAYWRIGHT: BONFIRE PORTAL SCRAPER ───────────────────────────────────────
+BONFIRE_SOURCES = {
+    "Fairfax County Government":     "https://fairfaxcounty.bonfirehub.com/portal/?tab=openOpportunities",
+    "Fairfax County Public Schools": "https://fcps.bonfirehub.com/portal/?tab=openOpportunities",
+    "George Mason University":       "https://gmu.bonfirehub.com/portal/?tab=openOpportunities",
+}
+
+_BONFIRE_WAIT_SELECTOR = "a[href*='/opportunities/']"
+
+
+def fetch_rendered_html(url: str, wait_selector: str = None, timeout_ms: int = 25000) -> str:
+    from playwright.sync_api import sync_playwright  # lazy import — optional dependency
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page(user_agent=HEADERS["User-Agent"])
+        try:
+            page.goto(url, timeout=timeout_ms, wait_until="networkidle")
+            if wait_selector:
+                page.wait_for_selector(wait_selector, timeout=timeout_ms)
+            html = page.content()
+        finally:
+            browser.close()
+        return html
+
+
+def scrape_bonfire(url: str, label: str) -> list:
+    print(f"  🔍 Scraping {label} (Playwright): {url}")
+    try:
+        html = fetch_rendered_html(url, wait_selector=_BONFIRE_WAIT_SELECTOR)
+        soup = BeautifulSoup(html, "html.parser")
+    except Exception as e:
+        print(f"  ❌ Failed: {e}")
+        return []
+
+    base_domain = _base_domain(url)
+    results = []
+    seen: set = set()
+
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if "/opportunities/" not in href:
+            continue
+
+        title = a.get_text(strip=True)
+        if not title or len(title) < 5 or len(title) > 200 or title in seen:
+            continue
+        if _looks_like_nav_or_reference(title):
+            continue
+
+        full_url = _resolve_href(href, base_domain)
+
+        parent = a.find_parent(["li", "div", "p", "td", "article"])
+        desc = ""
+        if parent:
+            ctx = parent.get_text(separator=" ", strip=True)
+            ctx = re.sub(re.escape(title), "", ctx).strip()
+            desc = re.sub(r"\s+", " ", ctx).strip()
+
+        if not is_construction_related(title, desc):
+            continue
+        if not _has_procurement_signal(title, desc):
+            continue
+
+        close_m = re.search(r"(?:Closes|Closing Date|Due Date|Deadline)[:\s]+([^\.\n]+)", desc, re.IGNORECASE)
+        if close_m:
+            desc = f"Closes: {close_m.group(1).strip()}  |  {desc}"
+
+        seen.add(title)
+        results.append({
+            "title":       title,
+            "description": truncate_text(desc or f"See {label} Bonfire portal for details."),
+            "url":         full_url,
+        })
+
+    print(f"  ✅ Found {len(results)} construction items in {label}")
+    return results
+
+
+# ── PLAYWRIGHT: REMAINING JS-RENDERED SOURCES ───────────────────────────────
+
+def fetch_rendered_page(url: str, wait_selector: str = None, timeout_ms: int = 25000):
+    from playwright.sync_api import sync_playwright  
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page(user_agent=HEADERS["User-Agent"])
+        try:
+            page.goto(url, timeout=timeout_ms, wait_until="networkidle")
+            if wait_selector:
+                try:
+                    page.wait_for_selector(wait_selector, timeout=timeout_ms)
+                except Exception:
+                    print(f"    ⚠️  wait_selector {wait_selector!r} never appeared — continuing anyway")
+            page.wait_for_timeout(1500)
+            html = page.content()
+            final_url = page.url
+        finally:
+            browser.close()
+        return html, final_url
+
+
+def scrape_js_rendered_generic(url: str, label: str, wait_selector: str = None) -> list:
+    print(f"  🔍 Scraping {label} (Playwright): {url}")
+    try:
+        html, final_url = fetch_rendered_page(url, wait_selector=wait_selector)
+        if _redirected_away(url, final_url):
+            print(f"  ⚠️  {label}: URL redirected to an unrelated page ({final_url}) — skipping this source")
+            return []
+        soup = BeautifulSoup(html, "html.parser")
+    except Exception as e:
+        print(f"  ❌ Failed: {e}")
+        return []
+
+    results = _extract_listing_from_soup(soup, url, label)
+    print(f"  ✅ Found {len(results)} construction items in {label}")
+    return results
+
+OPENGOV_SOURCES = {
+    "Charlottesville": "https://procurement.opengov.com/portal/charlottesville",
+    "Vienna":           "https://procurement.opengov.com/portal/viennava",
+}
+_OPENGOV_WAIT_SELECTOR = "a[href*='/projects/']"
+
+
+def scrape_opengov(url: str, label: str) -> list:
+    return scrape_js_rendered_generic(url, label, wait_selector=_OPENGOV_WAIT_SELECTOR)
+
+PUBLICPURCHASE_SOURCES = {
+    "Chantilly": "https://www1.publicpurchase.com/gems/buyer/public/home?syndicatedOrgId=32007&region=VA",
+}
+
+
+def scrape_publicpurchase(url: str, label: str) -> list:
+    return scrape_js_rendered_generic(url, label, wait_selector=None)
+
+IONWAVE_SOURCES = {
+    "Loudoun County School District": "https://lcpscm.ionwave.net/SourcingEvents.aspx?SourceType=1",
+}
+
+
+def scrape_ionwave(url: str, label: str) -> list:
+    return scrape_js_rendered_generic(url, label, wait_selector=None)
+
+SCIQUEST_SOURCES = {
+    "William & Mary": "https://bids.sciquest.com/apps/Router/PublicEvent?tab=PHX_NAV_SourcingOpenForBid&CustomerOrg=WilliamMary",
+}
+
+
+def scrape_sciquest(url: str, label: str) -> list:
+    return scrape_js_rendered_generic(url, label, wait_selector=None)
+
+ORACLE_CLOUD_SOURCES = {
+    "Arlington County (Oracle Cloud)": (
+        "https://fa-exkk-saasfaprod1.fa.ocs.oraclecloud.com/fscmUI/faces/NegotiationAbstracts"
+        "?prcBuId=300000009743672"
+    ),
+}
+
+
+def scrape_oracle_cloud(url: str, label: str) -> list:
+    return scrape_js_rendered_generic(url, label, wait_selector=None)
+
+
+# ── NEW: EVA STATEWIDE (TABLE-BASED) SCRAPER ─────────────────────────────────
+def scrape_eva_statewide(url: str, label: str) -> list:
+    print(f"  🔍 Scraping {label}: {url}")
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=20)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+    except Exception as e:
+        print(f"  ❌ Failed: {e}")
+        return []
+
+    base_domain = _base_domain(url)
+    results = []
+    seen: set = set()
+
+    for row in soup.select("tr"):
+        cells = row.find_all("td")
+        if len(cells) < 2:
+            continue
+
+        title = ""
+        link = url
+        for cell in cells:
+            a = cell.find("a", href=True)
+            cell_text = cell.get_text(strip=True)
+            if a and len(cell_text) > len(title):
+                title = cell_text
+                link = _resolve_href(a["href"], base_domain)
+            elif not title and len(cell_text) > 10:
+                title = cell_text
+
+        if not title or len(title) < 5 or title in seen:
+            continue
+
+        detail_text = row.get_text(separator=" ", strip=True)
+        if not is_construction_related(title, detail_text):
+            continue
+
+        deadline_m = re.search(r"(\d{1,2}/\d{1,2}/\d{2,4})", detail_text)
+        desc = detail_text
+        if deadline_m:
+            desc = f"Due: {deadline_m.group(1)}  |  {desc}"
+
+        seen.add(title)
+        results.append({
+            "title":       title,
+            "description": truncate_text(desc or "See eVA Virginia Business Opportunities for details."),
+            "url":         link,
+        })
+
+    print(f"  ✅ Found {len(results)} construction solicitations in {label}")
+    return results
+
 # ── MAIN SCRAPE ──────────────────────────────────────────────────────────────
 def run_scrape():
     print("\n🚀 Starting scrape...\n")
@@ -908,6 +1374,32 @@ def run_scrape():
 
     # Track MWAA solicitation numbers across Current + Upcoming to avoid duplicates
     mwaa_seen_nums: set = set()
+
+    _RFQ_FAMILY_RE = re.compile(
+        r"request for qualifications|\bRFQP\b|construction manager at risk|\bCMR\b",
+        re.IGNORECASE,
+    )
+    _RFQ_FOLLOWUP_RE = re.compile(
+        r"\baddendum\b|pre-solicitation notice|notice of intent to award|notice of award",
+        re.IGNORECASE,
+    )
+
+    def _dedup_rfq_family(tagged: list, label: str) -> list:
+        deduped = []
+        rfq_family_seen = False
+        dropped = 0
+        for e in tagged:
+            if _RFQ_FAMILY_RE.search(e["title"]):
+                if rfq_family_seen:
+                    dropped += 1
+                    continue
+                rfq_family_seen = True  
+                deduped.append(e)       
+                continue                
+            deduped.append(e)           
+        if dropped:
+            print(f"    📎 Kept only the first Request-for-Qualifications/CMR notice in {label}, dropped {dropped} follow-up notice(s)")
+        return deduped
 
     def tag_and_store(label: str, entries: list, dedup_set: set = None, extra_filter=None):
         nonlocal total_count, new_count
@@ -923,7 +1415,7 @@ def run_scrape():
             if is_expired(e.get("description", "")):
                 expired_count += 1
                 continue
-            if extra_filter is not None and not extra_filter(e.get("description", "")):
+            if extra_filter is not None and not extra_filter(e.get("title", ""), e.get("description", "")):
                 stale_count += 1
                 continue
             key    = e["title"]
@@ -933,35 +1425,101 @@ def run_scrape():
             print(f"    🗓️  Dropped {expired_count} expired listing(s) in {label}")
         if stale_count:
             print(f"    🚧 Dropped {stale_count} already-started/awarded/completed listing(s) in {label}")
+        tagged = _dedup_rfq_family(tagged, label)
         all_data[label] = tagged
         total_count    += len(tagged)
         new_count      += sum(1 for e in tagged if e["is_new"])
 
-    # ── MWAA (deduplicate Upcoming vs Current) ──
+    # ══════════════════════════════════════════════════════════════════════
+
+    # ── AGENCIES (statewide / multi-jurisdiction — not tied to one locality) ──
     mwaa_current_entries = scrape_mwaa(MWAA_SOURCES["MWAA Current"], "MWAA Current")
     tag_and_store("MWAA Current", mwaa_current_entries, mwaa_seen_nums)
 
     mwaa_upcoming_entries = scrape_mwaa(MWAA_SOURCES["MWAA Upcoming"], "MWAA Upcoming")
     tag_and_store("MWAA Upcoming", mwaa_upcoming_entries, mwaa_seen_nums)
 
-    # ── VDOT (staleness filter: drop already-started/awarded/completed projects) ──
     for label, url in VDOT_SOURCES.items():
         entries = scrape_vdot_district(url, label)
         tag_and_store(label, entries, extra_filter=vdot_should_include)
 
-    # ── Counties ──
-    for label, url in COUNTY_SOURCES.items():
-        if "fairfax" in url:
-            entries = scrape_fairfax(url, label)
-        elif "loudoun" in url:
-            entries = scrape_loudoun(url, label)
-        else:
-            entries = []
+    for label, url in EVA_SOURCES.items():
+        entries = scrape_eva_statewide(url, label)
         tag_and_store(label, entries)
 
-    # ── Arlington County (Playwright) ──
-    arlington_entries = scrape_arlington(ARLINGTON_PORTAL, "Arlington County")
-    tag_and_store("Arlington County", arlington_entries)
+    # ── FAIRFAX COUNTY, then City of Fairfax, Herndon, Falls Church ──
+    tag_and_store("Fairfax County", scrape_fairfax(COUNTY_SOURCES["Fairfax County"], "Fairfax County"))
+    tag_and_store("Fairfax County (Bonfire Portal)",
+                  scrape_bonfire(BONFIRE_SOURCES["Fairfax County Government"], "Fairfax County (Bonfire Portal)"))  # Playwright — unverified; see note below
+    tag_and_store("City of Fairfax", scrape_generic_listing(GENERIC_SOURCES["City of Fairfax"], "City of Fairfax"))
+    tag_and_store("Herndon", scrape_generic_listing(GENERIC_SOURCES["Herndon"], "Herndon"))
+    tag_and_store("Falls Church", scrape_civicplus_bids(CIVICPLUS_SOURCES["Falls Church"], "Falls Church"))
+    tag_and_store("Vienna", scrape_opengov(OPENGOV_SOURCES["Vienna"], "Vienna"))  # Playwright — unverified selector
+    tag_and_store("Chantilly", scrape_publicpurchase(PUBLICPURCHASE_SOURCES["Chantilly"], "Chantilly"))  # Playwright — unverified
+    tag_and_store("Fairfax County Public Schools",
+                  scrape_bonfire(BONFIRE_SOURCES["Fairfax County Public Schools"], "Fairfax County Public Schools"))  # Playwright
+    tag_and_store("George Mason University",
+                  scrape_bonfire(BONFIRE_SOURCES["George Mason University"], "George Mason University"))  # Playwright
+
+    # ── LOUDOUN COUNTY, then Leesburg (the county seat, a town within it) ──
+    tag_and_store("Loudoun County", scrape_loudoun(COUNTY_SOURCES["Loudoun County"], "Loudoun County"))
+    tag_and_store("Leesburg", scrape_generic_listing(GENERIC_SOURCES["Leesburg"], "Leesburg"))
+    tag_and_store("Loudoun County School District",
+                  scrape_ionwave(IONWAVE_SOURCES["Loudoun County School District"], "Loudoun County School District"))  # Playwright — unverified
+
+    # ── ARLINGTON COUNTY (no incorporated towns within it) ──
+    tag_and_store("Arlington County", scrape_arlington(ARLINGTON_PORTAL, "Arlington County"))
+    tag_and_store("Arlington County (Oracle Cloud)",
+                  scrape_oracle_cloud(ORACLE_CLOUD_SOURCES["Arlington County (Oracle Cloud)"], "Arlington County (Oracle Cloud)"))  # Playwright — unverified, likely needs login
+
+    # ── CITY OF HAMPTON (independent city, not part of any county) ──
+    tag_and_store("Hampton", scrape_civicplus_bids(CIVICPLUS_SOURCES["Hampton"], "Hampton"))
+
+    # ── CITY OF NORFOLK, then Norfolk International Airport and Old Dominion
+    #    University (both physically located within the city) ──
+    tag_and_store("City of Norfolk", scrape_generic_listing(GENERIC_SOURCES["City of Norfolk"], "City of Norfolk"))
+    tag_and_store("Norfolk International Airport",
+                  scrape_generic_listing(GENERIC_SOURCES["Norfolk International Airport"], "Norfolk International Airport"))
+    tag_and_store("Old Dominion University",
+                  scrape_generic_listing(GENERIC_SOURCES["Old Dominion University"], "Old Dominion University"))
+
+    # ── CITY OF CHESAPEAKE (independent city) ──
+    tag_and_store("Chesapeake", scrape_generic_listing(GENERIC_SOURCES["Chesapeake"], "Chesapeake"))
+
+    # ── HENRICO COUNTY: Richmond International Airport and University of
+    #    Richmond are both physically in Henrico County, not the City of
+    #    Richmond, despite the "Richmond" names ──
+    tag_and_store("Richmond International Airport",
+                  scrape_generic_listing(GENERIC_SOURCES["Richmond International Airport"], "Richmond International Airport"))
+    tag_and_store("University of Richmond",
+                  scrape_generic_listing(GENERIC_SOURCES["University of Richmond"], "University of Richmond"))
+
+    # ── CITY OF CHARLOTTESVILLE: University of Virginia, and the city itself ──
+    tag_and_store("University of Virginia",
+                  scrape_generic_listing(GENERIC_SOURCES["University of Virginia"], "University of Virginia"))
+    tag_and_store("Charlottesville", scrape_opengov(OPENGOV_SOURCES["Charlottesville"], "Charlottesville"))  # Playwright — unverified, blocked a plain fetch earlier
+
+    # ── MONTGOMERY COUNTY: Virginia Tech (Blacksburg) ──
+    tag_and_store("Virginia Tech", scrape_generic_listing(GENERIC_SOURCES["Virginia Tech"], "Virginia Tech"))
+
+    # ── CITY OF RADFORD (independent city, enclave within Montgomery County) ──
+    tag_and_store("Radford University",
+                  scrape_generic_listing(GENERIC_SOURCES["Radford University"], "Radford University"))
+
+    # ── ROANOKE COUNTY: Roanoke-Blacksburg Regional Airport ──
+    tag_and_store("Roanoke-Blacksburg Regional Airport",
+                  scrape_generic_listing(GENERIC_SOURCES["Roanoke-Blacksburg Regional Airport"], "Roanoke-Blacksburg Regional Airport"))
+
+    # ── PRINCE EDWARD COUNTY: Hampden-Sydney College ──
+    tag_and_store("Hampden-Sydney College",
+                  scrape_generic_listing(GENERIC_SOURCES["Hampden-Sydney College"], "Hampden-Sydney College"))
+
+    # ── HANOVER COUNTY: Randolph-Macon College (Ashland) ──
+    tag_and_store("Randolph-Macon College",
+                  scrape_generic_listing(GENERIC_SOURCES["Randolph-Macon College"], "Randolph-Macon College"))
+
+    # ── CITY OF WILLIAMSBURG: William & Mary ──
+    tag_and_store("William & Mary", scrape_sciquest(SCIQUEST_SOURCES["William & Mary"], "William & Mary"))  # Playwright — unverified, may require vendor login
 
     # ── Persist history ──
     all_keys = {e["title"] for entries in all_data.values() for e in entries}
@@ -1038,6 +1596,26 @@ def build_pdf(all_data: dict, total_count: int, new_count: int) -> str:
         "Fairfax County":        "#6A1B9A",
         "Loudoun County":        "#B71C1C",
         "Arlington County":      "#00695C",   # teal
+        # NEW section colours (additions only — existing entries above are untouched)
+        "Hampton":                              "#8D6E00",
+        "Falls Church":                         "#8D6E00",
+        "Loudoun County Sheriff":               "#8D6E00",
+        "City of Norfolk":                      "#37474F",
+        "Chesapeake":                           "#37474F",
+        "Herndon":                              "#37474F",
+        "City of Fairfax":                      "#37474F",
+        "Leesburg":                             "#37474F",
+        "Norfolk International Airport":        "#AD1457",
+        "Richmond International Airport":       "#AD1457",
+        "Roanoke-Blacksburg Regional Airport":  "#AD1457",
+        "University of Virginia":               "#455A64",
+        "Virginia Tech":                        "#455A64",
+        "University of Richmond":               "#455A64",
+        "Old Dominion University":              "#455A64",
+        "Radford University":                   "#455A64",
+        "Hampden-Sydney College":               "#455A64",
+        "Randolph-Macon College":               "#455A64",
+        "Virginia eVA Statewide (Open Construction)": "#F57F17",
     }
 
     story = []
@@ -1226,7 +1804,7 @@ BREAKDOWN BY SOURCE
 {chr(10).join(section_lines)}
 
 {new_items_section}
-Sources: MWAA, VDOT Northern Virginia, Fairfax County, Loudoun County, and Arlington County.
+Sources: MWAA, VDOT Northern Virginia, Fairfax County, Loudoun County, Arlington County, Airports, and Colleges.
 
 This is an automated daily report. Please do not reply to this email.
 
