@@ -47,8 +47,8 @@ CLIENT_SECRET = os.getenv("crisdel_client_secret")
 EMAIL_SENDER   = "analytics@crisdel.com" 
 EMAIL_PASSWORD = os.environ.get("CRISDEL_EMAIL_PASSWORD", "")
 
-EMAIL_TO  = ["rmacak@crisdel.com"]  
-EMAIL_CC  = []                         
+EMAIL_TO  = ["frankc@crisdel.com", "mpollio@crisdel.com", "barryh@crisdel.com", "michaelc@crisdel.com", "groti@crisdel.com", "franksr@crisdel.com"]  
+EMAIL_CC  = ["rmacak@crisdel.com"]                         
 
 PDF_FILE     = "Crisdel Virginia Public Opportunities {date}.pdf" 
 HISTORY_FILE = "seen_opportunities.json"
