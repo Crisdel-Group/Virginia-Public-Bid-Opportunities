@@ -119,6 +119,11 @@ BLOCKED_TITLES = [
     "electrical and emergency power system",              # Fairfax County
     "consolidated rental car facility",                   # Norfolk International Airport (CONRAC)
     "departures terminal expansion and modernization",    # Norfolk International Airport CMR RFQ/P
+    # City of Fairfax site pages / non-bid documents (added 2026-10-19)
+    "how bid openings work",
+    "current solicitations",
+    "ada self",                                           # ADA Self-Evaluation and Transition Plan
+    "feasibility study",                                  # e.g. Concept Feasibility Study
 ]
 
 
