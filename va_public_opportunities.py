@@ -54,7 +54,7 @@ EMAIL_SENDER   = "analytics@crisdel.com"
 EMAIL_PASSWORD = os.environ.get("CRISDEL_EMAIL_PASSWORD", "")
 
 EMAIL_TO = ["rmacak@crisdel.com"]
-EMAIL_CC = [""]
+EMAIL_CC = []
 
 PDF_FILE     = "Crisdel Virginia Public Opportunities {date}.pdf" 
 HISTORY_FILE = "seen_opportunities.json"
@@ -1880,14 +1880,15 @@ This is an automated daily report. Please do not reply to this email.
         "Content-Type": "application/json"
     }
    
-    all_recipients = EMAIL_TO + EMAIL_CC
+    all_recipients = [e for e in EMAIL_TO + EMAIL_CC if e.strip()]
     to_recipients = []
     cc_recipients = []
    
     for email in EMAIL_TO:
         to_recipients.append({"emailAddress": {"address": email}})
     for email in EMAIL_CC:
-        cc_recipients.append({"emailAddress": {"address": email}})
+        if email.strip():  # skip blank entries — an empty address makes Microsoft reject the whole email
+            cc_recipients.append({"emailAddress": {"address": email.strip()}})
    
     payload = {
         "message": {
