@@ -24,6 +24,12 @@ jobs:
       - name: Install Python packages
         run: pip install -r requirements.txt
 
+      # NEW: pip only installs the Playwright library — the Chromium browser
+      # it drives has to be downloaded separately (plus the Linux system
+      # libraries it needs, via --with-deps).
+      - name: Install Playwright browser
+        run: python -m playwright install --with-deps chromium
+
       - name: Run scraper
         run: python va_public_opportunities.py
 
@@ -34,4 +40,3 @@ jobs:
           git add seen_opportunities.json
           git diff --quiet --cached || git commit -m "Update seen opportunities history [skip ci]"
           git push
-
