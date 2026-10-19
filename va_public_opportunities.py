@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 from datetime import datetime
 from dateutil import parser as date_parser
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse  # urlparse is used by _redirected_away()
 
 try:
     from playwright.sync_api import sync_playwright
@@ -1188,8 +1188,27 @@ def scrape_generic_listing(url: str, label: str) -> list:
             return []
         soup = BeautifulSoup(resp.text, "html.parser")
     except Exception as e:
-        print(f"  ❌ Failed: {e}")
-        return []
+        # Some sites (City of Fairfax, Herndon, Leesburg, rfpschoolwatch)
+        # answer 403 Forbidden to plain scripted requests from cloud servers
+        # like GitHub's, and University of Richmond's certificate setup fails
+        # a plain request. A real browser often gets through both — retry once.
+        if not PLAYWRIGHT_AVAILABLE:
+            print(f"  ❌ Failed: {e}")
+            return []
+        print(f"    ⚠️  Plain request failed ({str(e)[:90]}) — retrying in a real browser...")
+        try:
+            html, final_url = fetch_rendered_page(url)
+            if _redirected_away(url, final_url):
+                print(f"  ⚠️  {label}: URL redirected to an unrelated page ({final_url}) — skipping this source")
+                return []
+            soup = BeautifulSoup(html, "html.parser")
+            page_text = soup.get_text(" ", strip=True).lower()
+            if len(page_text) < 300 or "access denied" in page_text or "forbidden" in page_text[:500]:
+                print(f"  ❌ Failed: {label} also blocks the browser (site's bot protection) — check this source manually")
+                return []
+        except Exception as e2:
+            print(f"  ❌ Failed: {e2}")
+            return []
 
     results = _extract_listing_from_soup(soup, url, label)
     print(f"  ✅ Found {len(results)} construction items in {label}")
@@ -1213,9 +1232,19 @@ def fetch_rendered_html(url: str, wait_selector: str = None, timeout_ms: int = 2
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(user_agent=HEADERS["User-Agent"])
         try:
-            page.goto(url, timeout=timeout_ms, wait_until="networkidle")
+            # "domcontentloaded", not "networkidle": portals like Bonfire and
+            # OpenGov keep background connections open, so the network never
+            # goes idle and the old setting timed out (Vienna, Charlottesville).
+            try:
+                page.goto(url, timeout=45000, wait_until="domcontentloaded")
+            except Exception as e:
+                print(f"    ⚠️  Page load was slow ({e.__class__.__name__}) — reading whatever loaded")
             if wait_selector:
-                page.wait_for_selector(wait_selector, timeout=timeout_ms)
+                try:
+                    page.wait_for_selector(wait_selector, timeout=timeout_ms)
+                except Exception:
+                    print(f"    ⚠️  No listing appeared for {wait_selector!r} — portal may have no open bids right now")
+            page.wait_for_timeout(2000)
             html = page.content()
         finally:
             browser.close()
@@ -1284,13 +1313,17 @@ def fetch_rendered_page(url: str, wait_selector: str = None, timeout_ms: int = 2
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(user_agent=HEADERS["User-Agent"])
         try:
-            page.goto(url, timeout=timeout_ms, wait_until="networkidle")
+            # See fetch_rendered_html: "networkidle" never fires on OpenGov.
+            try:
+                page.goto(url, timeout=45000, wait_until="domcontentloaded")
+            except Exception as e:
+                print(f"    ⚠️  Page load was slow ({e.__class__.__name__}) — reading whatever loaded")
             if wait_selector:
                 try:
                     page.wait_for_selector(wait_selector, timeout=timeout_ms)
                 except Exception:
                     print(f"    ⚠️  wait_selector {wait_selector!r} never appeared — continuing anyway")
-            page.wait_for_timeout(1500)
+            page.wait_for_timeout(3000)
             html = page.content()
             final_url = page.url
         finally:
