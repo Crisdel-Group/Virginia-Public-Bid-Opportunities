@@ -48,6 +48,7 @@ EMAIL_SENDER   = "analytics@crisdel.com"
 EMAIL_PASSWORD = os.environ.get("CRISDEL_EMAIL_PASSWORD", "")
 
 EMAIL_TO = ["rmacak@crisdel.com"]
+EMAIL_CC = [""]
 
 PDF_FILE     = "Crisdel Virginia Public Opportunities {date}.pdf" 
 HISTORY_FILE = "seen_opportunities.json"
