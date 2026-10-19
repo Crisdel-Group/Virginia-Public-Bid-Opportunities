@@ -13,21 +13,27 @@ Outputs a daily PDF report and emails it to all configured recipients.
 import os
 import re
 import json
-from urllib.parse import urlparse
-import smtplib
-import schedule
 import time
 import requests
 import msal
 import base64
+import difflib
 from dotenv import load_dotenv
-from dateutil import parser as date_parser  # ← ADD THIS LINE
 from datetime import datetime
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email import encoders
+from dateutil import parser as date_parser
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin
+
+try:
+    from playwright.sync_api import sync_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
+try:
+    import pdfplumber
+    PDFPLUMBER_AVAILABLE = True
+except ImportError:
+    PDFPLUMBER_AVAILABLE = False
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
 from reportlab.lib.styles import ParagraphStyle
