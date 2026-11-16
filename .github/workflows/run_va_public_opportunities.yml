@@ -1,18 +1,32 @@
 name: Run VA Public Opportunities Scraper
+
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 7 * * *'
+    - cron: '0 11 * * *'  # 7 AM during EDT
+    - cron: '0 12 * * *'  # 7 AM during EST
+
 jobs:
   run-scraper:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+
     env:
+      TZ: America/New_York
       crisdel_client_id: ${{ secrets.crisdel_client_id }}
       crisdel_tenant_id: ${{ secrets.crisdel_tenant_id }}
       crisdel_client_secret: ${{ secrets.crisdel_client_secret }}
+
     steps:
+      - name: Check Eastern time
+        if: github.event_name == 'schedule'
+        run: |
+          if [ "$(date +%H)" != "07" ]; then
+            echo "It is not 7 AM Eastern. Stopping this scheduled run."
+            exit 1
+          fi
+
       - name: Check out repository
         uses: actions/checkout@v4
 
@@ -24,9 +38,6 @@ jobs:
       - name: Install Python packages
         run: pip install -r requirements.txt
 
-      # NEW: pip only installs the Playwright library — the Chromium browser
-      # it drives has to be downloaded separately (plus the Linux system
-      # libraries it needs, via --with-deps).
       - name: Install Playwright browser
         run: python -m playwright install --with-deps chromium
 
