@@ -3,30 +3,27 @@ name: Run VA Public Opportunities Scraper
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 11 * * *'  # 7 AM during EDT
-    - cron: '0 12 * * *'  # 7 AM during EST
+    - cron: '17 5 * * *'
+      timezone: 'America/New_York'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: va-opportunities
+  cancel-in-progress: false
 
 jobs:
   run-scraper:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    timeout-minutes: 30
 
     env:
-      TZ: America/New_York
       crisdel_client_id: ${{ secrets.crisdel_client_id }}
       crisdel_tenant_id: ${{ secrets.crisdel_tenant_id }}
       crisdel_client_secret: ${{ secrets.crisdel_client_secret }}
 
     steps:
-      - name: Check Eastern time
-        if: github.event_name == 'schedule'
-        run: |
-          if [ "$(date +%H)" != "07" ]; then
-            echo "It is not 7 AM Eastern. Stopping this scheduled run."
-            exit 1
-          fi
-
       - name: Check out repository
         uses: actions/checkout@v4
 
@@ -34,6 +31,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
 
       - name: Install Python packages
         run: pip install -r requirements.txt
@@ -42,12 +40,27 @@ jobs:
         run: python -m playwright install --with-deps chromium
 
       - name: Run scraper
+        id: scrape
+        continue-on-error: true
         run: python va_public_opportunities.py
 
       - name: Commit updated history file
+        if: always()
+        env:
+          BRANCH: ${{ github.ref_name }}
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add seen_opportunities.json
-          git diff --quiet --cached || git commit -m "Update seen opportunities history [skip ci]"
-          git push
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "Update seen opportunities history"
+          git pull --rebase origin "$BRANCH"
+          git push origin HEAD:"$BRANCH"
+
+      - name: Fail run if scraper failed
+        if: steps.scrape.outcome == 'failure'
+        run: exit 1
